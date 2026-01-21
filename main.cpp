@@ -1056,9 +1056,9 @@ inline bool CheckForInjectedDLLs() {
         "libstdc++-6.dll",
         
         // فایل اجرایی خود برنامه
-        "Core.exe",
-        "CORE.EXE",
-        "core.exe",
+        "MemosMacro.exe",
+        "MEMOSMACRO.EXE",
+        "memosmacro.exe",
         
         // DLL های مرتبط با Interception
         "interception.dll",
@@ -2283,7 +2283,7 @@ std::string get_config_path() {
     if (SHGetFolderPathA(NULL, CSIDL_PERSONAL, NULL, 0, path) == S_OK) {
         std::string docs_path(path);
         // ایجاد پوشه برنامه اگر وجود نداشته باشد
-        std::string app_folder = docs_path + "\\TeaRCore";
+        std::string app_folder = docs_path + "\\MemosMacro";
         CreateDirectoryA(app_folder.c_str(), NULL);
         return app_folder + "\\config.json";
     }
@@ -4088,7 +4088,7 @@ void send_webhook_message(const std::string& webhook_url, const json& payload_js
     std::string payload_str = payload_json.dump();
     std::string headers = "Content-Type: application/json\r\n";
 
-    HINTERNET hInternet = InternetOpen(" Core Webhook Client", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
+    HINTERNET hInternet = InternetOpen(" Memos Macro Webhook Client", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
     if (!hInternet) {
         output_log_message("Error: InternetOpen failed for webhook.\n");
         return;
@@ -4179,7 +4179,7 @@ bool check_license_socket_simulated(const std::string& license_key, long long& o
     base_api_url += "?license=" + license_key + "&device_id=" + device_id_hashed + "&version=" + APP_VERSION_NUMBER; // پارامتر ورژن را اضافه کنید // اضافه کردن پارامترها
 
 
-    HINTERNET hInternet = InternetOpen(" Core Client", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
+    HINTERNET hInternet = InternetOpen(" Memos Macro Client", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
     if (!hInternet) {
         {
             std::lock_guard<std::mutex> lock(g_login_error_mutex);
@@ -4483,7 +4483,7 @@ void perform_free_trial_async() {
     std::string response_body;
     DWORD bytes_read = 0;
     HINTERNET hConnect = NULL;
-    HINTERNET hInternet = InternetOpen(" Core Client", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
+    HINTERNET hInternet = InternetOpen(" Memos Macro Client", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
     if (!hInternet) {
         api_error_message_local = "Failed to initialize WinINet.";
         goto fail;
@@ -4605,7 +4605,7 @@ void cleanup_and_exit() {
     // Destroy window is called in main before calling cleanup_and_exit
     // ::DestroyWindow(hwnd); // This is called in main
     if (hwnd) { // Check if hwnd is still valid before unregistering class
-        ::UnregisterClass(" Core", GetModuleHandle(NULL)); // Use the same class name as RegisterClassEx
+        ::UnregisterClass(" Memos Macro", GetModuleHandle(NULL)); // Use the same class name as RegisterClassEx
         output_log_message("Window class unregistered.\n");
     }
 
@@ -5870,7 +5870,7 @@ int main(int, char**) {
 
     // 2. Create Win32 Window
     output_log_message("Attempting to register window class...\n");
-    WNDCLASSEX wc = { sizeof(WNDCLASSEX), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(NULL), NULL, NULL, NULL, NULL, "TeaR Core", NULL }; // Changed window title
+    WNDCLASSEX wc = { sizeof(WNDCLASSEX), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(NULL), NULL, NULL, NULL, NULL, "Memos Macro", NULL }; // Changed window title
     if (!::RegisterClassEx(&wc)) {
         output_log_message("Error: Failed to register window class!\n");
         // Consider adding GetLastError() here for more details
@@ -5881,7 +5881,7 @@ int main(int, char**) {
     output_log_message("Window class registered.\n");
 
     output_log_message("Attempting to create window...\n");
-    hwnd = ::CreateWindow(wc.lpszClassName, "Core", WS_OVERLAPPEDWINDOW, 100, 100, 600, 700, NULL, NULL, wc.hInstance, NULL); // Changed window title
+    hwnd = ::CreateWindow(wc.lpszClassName, "Memos Macro", WS_OVERLAPPEDWINDOW, 100, 100, 600, 700, NULL, NULL, wc.hInstance, NULL); // Changed window title
     if (!hwnd) {
         output_log_message("Error: Failed to create window!\n");
         // Consider adding GetLastError() here for more details
@@ -7453,7 +7453,7 @@ bool hide_interception_dll() {
             // ایجاد مسیر در AppData برای ذخیره DLL
             char appDataPath[MAX_PATH];
             if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, appDataPath))) {
-                std::string appFolder = std::string(appDataPath) + "\\CoreProgram";
+                std::string appFolder = std::string(appDataPath) + "\\MemosMacro";
                 
                 // ایجاد پوشه اگر وجود ندارد
                 DWORD folderAttributes = GetFileAttributesA(appFolder.c_str());
@@ -7598,4 +7598,3 @@ void CleanupRenderTarget() {
     if (g_mainRenderTargetView) { g_mainRenderTargetView->Release(); g_mainRenderTargetView = NULL; output_log_message("RenderTargetView released.\n"); }
     output_log_message("RenderTargetView cleanup finished.\n");
 }
-
