@@ -316,6 +316,9 @@ int main() {
     std::vector<Macro> macros = LoadMacros();
 
     std::cout << "Driver-free macro console ready (Win11).\n";
+    std::cout << "Press Enter to open the menu.\n";
+    std::string startup;
+    std::getline(std::cin, startup);
 
     while (true) {
         PrintMenu();
@@ -372,5 +375,8 @@ int main() {
     SaveConfig(config);
     SaveMacros(macros);
     std::cout << "Goodbye!" << std::endl;
+    std::cout << "Press Enter to exit.\n";
+    std::string exit_line;
+    std::getline(std::cin, exit_line);
     return 0;
 }
