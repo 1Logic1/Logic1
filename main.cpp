@@ -1,8 +1,6 @@
 #define _WIN32_WINNT 0x0A00 // Windows 10
 #include <windows.h>
 
-// اعلان تابع مخفی کردن DLL
-bool hide_interception_dll();
 #include <iostream> // Keep for logging to console/file
 #include <cstdio>   // For printf
 #include <cstdlib>  // For std::atexit
@@ -12,8 +10,8 @@ bool hide_interception_dll();
 #include <cmath> // Needed for floor(), ceil()
 #include <thread>
 #include <chrono>
-#include <atomic>
 #include <mutex>
+#include <exception>
 #include <stdexcept>
 #include <algorithm>
 #include <fstream>
@@ -36,7 +34,6 @@ bool hide_interception_dll();
 #include <locale.h> // For _get_user_locale / setlocale, although GetUserDefaultUILanguage is better
 #include <winreg.h> // For Registry access (VM Check)
 #include <winnls.h> // For Language/Locale info
-#include <vector> // Needed for Base64
 #include <stdint.h> // Needed for Base64 uint8_t
 #include <shlobj.h> // For SHGetFolderPathA
 #include <tlhelp32.h> // For CreateToolhelp32Snapshot, Process32First, Process32Next
@@ -48,7 +45,9 @@ bool hide_interception_dll();
 #include "interception_functions.h" // هدر توابع جدید برای بارگذاری داخلی interception.dll
 
 // Forward declarations
-// ... 
+// ...
+LONG WINAPI UnhandledExceptionHandler(EXCEPTION_POINTERS* exception_info);
+void TerminateHandler();
 #pragma comment(lib, "winmm.lib") // Link against winmm.lib for PlaySound (MSVC specific)
 #pragma comment(lib, "wininet.lib") // Link against wininet.lib for HTTP requests (MSVC specific)
 
@@ -1506,6 +1505,7 @@ InterceptionDevice keyboard_device_id = 0;
 InterceptionDevice mouse_device_id = 0;
 // متغیرهای سراسری برای وضعیت نصب درایور Interception
 bool g_interception_driver_installed = false; // وضعیت نصب درایور
+bool g_interception_available = false; // Interception DLL and context successfully initialized
 int g_app_run_count = 0; // تعداد دفعات اجرای برنامه
 bool g_system_restart_required = false; // نیاز به ریستارت سیستم
 bool g_show_restart_message = false; // نمایش پیام ریستارت
@@ -1690,9 +1690,22 @@ void sleep_ms(int ms) {
     }
 }
 
+void move_mouse_relative_sendinput(int dx, int dy) {
+    if (dx == 0 && dy == 0) return;
+    INPUT input{};
+    input.type = INPUT_MOUSE;
+    input.mi.dx = dx;
+    input.mi.dy = dy;
+    input.mi.dwFlags = MOUSEEVENTF_MOVE;
+    SendInput(1, &input, sizeof(input));
+}
+
 void move_mouse_relative_interception(int dx, int dy) {
     if (dx == 0 && dy == 0) return;
-    if (!context || !mouse_device_id) return;
+    if (!g_interception_available || !context || !mouse_device_id) {
+        move_mouse_relative_sendinput(dx, dy);
+        return;
+    }
 
     InterceptionMouseStroke mouse_stroke;
     mouse_stroke.x = dx;
@@ -1785,6 +1798,31 @@ void output_log_message(const std::string& message) {
     // For now, just output to console.
     std::cout << message << std::flush;
     // TODO: Optionally append to an ImGui text buffer
+}
+
+void log_fatal_error(const std::string& message) {
+    output_log_message(message);
+    std::ofstream crash_log("crash.log", std::ios::app);
+    if (crash_log.is_open()) {
+        crash_log << message << std::flush;
+    }
+}
+
+LONG WINAPI UnhandledExceptionHandler(EXCEPTION_POINTERS* exception_info) {
+    std::ostringstream message;
+    message << "FATAL ERROR: Unhandled exception 0x"
+            << std::hex << exception_info->ExceptionRecord->ExceptionCode
+            << " at address 0x" << exception_info->ExceptionRecord->ExceptionAddress
+            << std::dec << "\n";
+    log_fatal_error(message.str());
+    MessageBoxA(NULL, message.str().c_str(), "Fatal Error", MB_OK | MB_ICONERROR);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+void TerminateHandler() {
+    log_fatal_error("FATAL ERROR: std::terminate called.\n");
+    MessageBoxA(NULL, "FATAL ERROR: std::terminate called.\n", "Fatal Error", MB_OK | MB_ICONERROR);
+    std::abort();
 }
 
 // Helper function to play a sound asynchronously
@@ -5481,252 +5519,33 @@ int main(int, char**) {
 
     // شروع برنامه
 
-    // بررسی مستقیم وضعیت سرویس Interception و به‌روزرسانی config.json
-    updateInterceptionDriverStatus();
-    
-    // بررسی وجود فایل SHOW_RESTART_AGAIN.txt برای نمایش مجدد پنجره نصب
-    char current_dir[MAX_PATH];
-    GetCurrentDirectoryA(MAX_PATH, current_dir);
-    std::string show_again_flag_path = std::string(current_dir) + "\\SHOW_RESTART_AGAIN.txt";
-    bool show_install_again = std::filesystem::exists(show_again_flag_path);
-    
-    // اگر فایل SHOW_RESTART_AGAIN.txt وجود داشته باشد، آن را حذف کن
-    if (show_install_again) {
-        output_log_message("[DEBUG] Found SHOW_RESTART_AGAIN.txt. Will show installation dialog again.\n");
-        try {
-            forceDeleteFile(show_again_flag_path);
-            output_log_message("[DEBUG] Successfully deleted SHOW_RESTART_AGAIN.txt.\n");
-        } catch (...) {
-            output_log_message("[DEBUG] Failed to delete SHOW_RESTART_AGAIN.txt.\n");
-        }
-    }
-    
-    // بررسی وجود فایل نصبی installinterception.exe
-    std::vector<std::string> installer_names = {
-        "install-interception.exe",
-        "installinterception.exe",
-        "interception-install.exe",
-        "interceptioninstall.exe"
-    };
-    
-    bool installer_exists = false;
-    std::string found_installer_path;
-    
-    // بررسی وجود هر یک از فایل‌های نصبی
-    for (const auto& name : installer_names) {
-        std::string installer_path = std::string(current_dir) + "\\" + name;
-        if (std::filesystem::exists(installer_path)) {
-            installer_exists = true;
-            found_installer_path = installer_path;
-            output_log_message("[DEBUG] Found installer file: " + installer_path + "\n");
-            break;
-        }
-    }
-    
-    output_log_message("[DEBUG] Installer exists: " + std::string(installer_exists ? "true" : "false") + "\n");
-    
-    // بررسی و نصب درایور Interception در اولین اجرای برنامه یا اگر کاربر قبلاً نصب را رد کرده باشد
-    if (g_app_run_count <= 1 || show_install_again) {
-        bool installation_result = checkAndInstallInterceptionDriver();
-        if (!installation_result) {
-            std::cerr << "Failed to install Interception driver. Some features may not work correctly.\n";
-            output_log_message("[DEBUG] Installation failed or was cancelled.\n");
-        } else {
-            output_log_message("[DEBUG] Installation was successful.\n");
-            
-            // کاربر نصب را قبول کرده است - بررسی وجود فایل نصبی
-            output_log_message("[DEBUG] Installation was successful. Will check for installer file existence.\n");
-        }
-        
-        // بررسی مجدد وجود فایل نصبی بعد از نصب
-        bool installer_still_exists = false;
-        for (const auto& name : installer_names) {
-            std::string installer_path = std::string(current_dir) + "\\" + name;
-            if (std::filesystem::exists(installer_path)) {
-                installer_still_exists = true;
-                output_log_message("[DEBUG] Installer file still exists after installation: " + installer_path + "\n");
-                break;
-            }
-        }
-        output_log_message("[DEBUG] After installation - Installer exists: " + std::string(installer_still_exists ? "true" : "false") + "\n");
-        
-        // نمایش پیام ریستارت فقط اگر فایل نصبی وجود داشته باشد
-        if (installer_still_exists) {
-            std::cerr << "\n\n===== IMPORTANT NOTICE =====\n";
-            std::cerr << "Interception driver has been installed, but requires a SYSTEM RESTART to complete installation.\n";
-            std::cerr << "Please restart your computer and run this application again.\n";
-            std::cerr << "===========================\n\n";
-            
-            // ایجاد فایل راهنما برای ریستارت و باز کردن آن
-            try {
-                std::string restart_file_path = std::string(current_dir) + "\\RESTART_REQUIRED.txt";
-                
-                // ایجاد فایل
-                std::ofstream restart_notice(restart_file_path);
-                if (restart_notice.is_open()) {
-                    restart_notice << "===== IMPORTANT NOTICE =====\n\n";
-                    restart_notice << "Interception driver has been installed, but requires a SYSTEM RESTART to complete installation.\n\n";
-                    restart_notice << "Please restart your computer and run this application again.\n\n";
-                    restart_notice << "===========================\n";
-                    restart_notice.close();
-                    output_log_message("[DEBUG] Created RESTART_REQUIRED.txt file.\n");
-                    
-                    // باز کردن فایل با برنامه پیش‌فرض سیستم
-                    ShellExecuteA(NULL, "open", restart_file_path.c_str(), NULL, NULL, SW_SHOW);
-                    output_log_message("[DEBUG] Opened RESTART_REQUIRED.txt file for user.\n");
-                }
-            } catch (const std::exception& e) {
-                output_log_message("[DEBUG] Error creating or opening restart notice file: " + std::string(e.what()) + "\n");
-            } catch (...) {
-                output_log_message("[DEBUG] Unknown error creating or opening restart notice file.\n");
-            }
-        } else {
-            output_log_message("[DEBUG] Not showing restart message because installer file does not exist.\n");
-        }
-    } else if (!g_interception_driver_installed && !std::filesystem::exists("RESTART_REQUIRED.txt")) {
-        // اگر اولین اجرا نیست اما درایور نصب نشده و فایل RESTART_REQUIRED.txt هم وجود ندارد
-        output_log_message("Driver not installed and no restart required file found. Checking Interception driver...\n");
-        if (!checkAndInstallInterceptionDriver()) {
-            output_log_message("Failed to install Interception driver. Some features may not work correctly.\n");
-        }
-    } else {
-        output_log_message("Not first run or driver already installed. Skipping driver installation.\n");
-    }
-    
-    if (!loadInterceptionDLL()) {
-        std::cerr << "\n\n===== IMPORTANT NOTICE =====\n";
-        std::cerr << "Interception driver has been installed, but requires a SYSTEM RESTART to complete installation.\n";
-        
-        // تعریف متغیر برای تصمیم‌گیری درباره نمایش پیام ریستارت
-        bool should_show_restart_message = false;
-        
-        // بررسی وجود فایل نصبی
-        char current_dir[MAX_PATH];
-        GetCurrentDirectoryA(MAX_PATH, current_dir);
-        
-        // لیست نام‌های ممکن برای فایل نصبی
-        std::vector<std::string> installer_names = {
-            "install-interception.exe",
-            "installinterception.exe",
-            "interception-install.exe",
-            "interceptioninstall.exe"
-        };
-        
-        // بررسی وجود هر یک از فایل‌های نصبی
-        bool installer_exists = false;
-        for (const auto& name : installer_names) {
-            std::string installer_path = std::string(current_dir) + "\\" + name;
-            output_log_message("[DEBUG] Checking for installer file: " + installer_path + "\n");
-            
-            if (std::filesystem::exists(installer_path)) {
-                installer_exists = true;
-                output_log_message("[DEBUG] Found installer file: " + installer_path + "\n");
-                break;
-            }
-        }
-        
-        // تصمیم‌گیری برای نمایش پیام ریستارت
-        if (installer_exists) {
-            output_log_message("[DEBUG] Installer file exists. Will show restart message.\n");
-            should_show_restart_message = true;
-        } else {
-            output_log_message("[DEBUG] No installer file found. Will NOT show restart message.\n");
-            should_show_restart_message = false;
-        }
-        // شرط 2: اگر فایل SHOW_RESTART_AGAIN.txt وجود داشته باشد
-        std::string show_again_flag_path = std::string(current_dir) + "\\SHOW_RESTART_AGAIN.txt";
-        if (std::filesystem::exists(show_again_flag_path)) {
-            output_log_message("[DEBUG] Found SHOW_RESTART_AGAIN.txt. Will show restart message.\n");
-            should_show_restart_message = true;
-            
-            // حذف فایل بعد از خواندن
-            try {
-                forceDeleteFile(show_again_flag_path);
-                output_log_message("[DEBUG] Successfully deleted SHOW_RESTART_AGAIN.txt.\n");
-            } catch (...) {
-                output_log_message("[DEBUG] Failed to delete SHOW_RESTART_AGAIN.txt.\n");
-            }
-        }
-        
-        // نمایش پیام ریستارت اگر شرایط برقرار باشد
-        if (should_show_restart_message) {
-            output_log_message("[DEBUG] Showing restart message. Conditions met.\n");
-            
-            // ایجاد فایل راهنما برای ریستارت و باز کردن آن
-            try {
-                // مسیر کامل فایل
-                std::string restart_file_path = std::string(current_dir) + "\\RESTART_REQUIRED.txt";
-                
-                // ایجاد فایل
-                std::ofstream restart_notice(restart_file_path);
-                if (restart_notice.is_open()) {
-                    restart_notice << "===== IMPORTANT NOTICE =====\n\n";
-                    restart_notice << "Interception driver has been installed, but requires a SYSTEM RESTART to complete installation.\n\n";
-                    restart_notice << "Please restart your computer and run this application again.\n\n";
-                    restart_notice << "===========================\n";
-                    restart_notice.close();
-                    output_log_message("[DEBUG] Created RESTART_REQUIRED.txt file.\n");
-                    
-                    // مخفی کردن فایل
-                    std::wstring wrestart_path = std::wstring(restart_file_path.begin(), restart_file_path.end());
-                    SetFileAttributesW(wrestart_path.c_str(), FILE_ATTRIBUTE_HIDDEN);
-                    output_log_message("[DEBUG] RESTART_REQUIRED.txt file is now hidden.\n");
-                    
-                    // نمایش پیام در کنسول
-                    std::cerr << "\n\n===== IMPORTANT NOTICE =====\n";
-                    std::cerr << "Interception driver has been installed, but requires a SYSTEM RESTART to complete installation.\n";
-                    std::cerr << "Please restart your computer and run this application again.\n";
-                    std::cerr << "===========================\n\n";
-                    
-                    // باز کردن فایل با برنامه پیش‌فرض سیستم
-                    ShellExecuteA(NULL, "open", restart_file_path.c_str(), NULL, NULL, SW_SHOW);
-                    output_log_message("[DEBUG] Opened RESTART_REQUIRED.txt file for user.\n");
-                }
-            } catch (const std::exception& e) {
-                output_log_message("[DEBUG] Error creating or opening restart notice file: " + std::string(e.what()) + "\n");
-            } catch (...) {
-                output_log_message("[DEBUG] Unknown error creating or opening restart notice file.\n");
-            }
-        } else {
-            output_log_message("[DEBUG] Skipping restart message. Conditions not met.\n");
-        }    
-        system("pause");
-        return 1;
+    SetUnhandledExceptionFilter(UnhandledExceptionHandler);
+    std::set_terminate(TerminateHandler);
+    output_log_message("Unhandled exception handler registered.\n");
+
+    output_log_message("Interception driver installation is disabled. Using SendInput fallback when unavailable.\n");
+    bool interception_loaded = loadInterceptionDLL();
+    if (!interception_loaded) {
+        output_log_message("Interception DLL not available. Continuing without driver.\n");
     }
 
-    context = interception_create_context_ptr();
-    if (!context) {
-        std::cerr << "Failed to create Interception context. Some features will be limited.\n";
-        output_log_message("Failed to create Interception context. Some features will be limited.\n");
-        output_log_message("WARNING: The program will continue without Interception driver. Mouse control features will not work.\n");
-        
-        // اگر نصب انجام شده اما ریستارت نشده، اطلاع بده
-        if (g_interception_driver_installed) {
-            std::cerr << "\n\n===== IMPORTANT NOTICE =====\n";
-            std::cerr << "Interception driver is marked as installed in config, but cannot be initialized.\n";
-            std::cerr << "This usually means you need to RESTART YOUR COMPUTER to complete the installation.\n";
-            std::cerr << "Please save your work and restart your computer.\n";
-            std::cerr << "===========================\n\n";
-            
-            // ایجاد فایل راهنما برای ریستارت
-            try {
-                std::ofstream restart_notice("RESTART_REQUIRED.txt");
-                if (restart_notice.is_open()) {
-                    restart_notice << "Interception driver has been installed, but requires a SYSTEM RESTART to complete installation.\n";
-                    restart_notice << "Please restart your computer and run this application again.\n";
-                    restart_notice.close();
-                }
-            } catch (...) {
-                // اگر نتوانستیم فایل را ایجاد کنیم، ادامه می‌دهیم
-            }
+    if (interception_loaded) {
+        context = interception_create_context_ptr();
+        if (!context) {
+            std::cerr << "Failed to create Interception context. Some features will be limited.\n";
+            output_log_message("Failed to create Interception context. Some features will be limited.\n");
+            output_log_message("WARNING: The program will continue without Interception driver. Mouse control features will not work.\n");
+            interception_loaded = false;
         }
-        
-        // ادامه اجرای برنامه بدون Interception
     }
 
-    // فیلتر کردن همه دستگاه‌ها. می‌توان دقیق‌تر انتخاب کرد.
-    interception_set_filter_ptr(context, (InterceptionPredicate)interception_is_keyboard_ptr, INTERCEPTION_FILTER_KEY_ALL);
-    interception_set_filter_ptr(context, (InterceptionPredicate)interception_is_mouse_ptr, INTERCEPTION_FILTER_MOUSE_ALL);
+    g_interception_available = interception_loaded && context != nullptr;
+
+    if (g_interception_available) {
+        // فیلتر کردن همه دستگاه‌ها. می‌توان دقیق‌تر انتخاب کرد.
+        interception_set_filter_ptr(context, (InterceptionPredicate)interception_is_keyboard_ptr, INTERCEPTION_FILTER_KEY_ALL);
+        interception_set_filter_ptr(context, (InterceptionPredicate)interception_is_mouse_ptr, INTERCEPTION_FILTER_MOUSE_ALL);
+    }
 
     // --- Main Interception Logic and Thread Management ---
     try {
@@ -5738,11 +5557,15 @@ int main(int, char**) {
         // g_attachment_states is initialized or loaded from config before this call.
         recalculate_all_profiles_threadsafe(); // Changed from calculate_all_profiles()
 
-        // Start the Interception input worker thread
-        output_log_message("Attempting to start Interception input worker thread...\n");
-        std::thread interception_worker_thread(interception_input_thread_func);
-        interception_worker_thread.detach(); // Detach as per existing recoil thread logic
-        output_log_message("Interception input worker thread started.\n");
+        if (g_interception_available) {
+            // Start the Interception input worker thread
+            output_log_message("Attempting to start Interception input worker thread...\n");
+            std::thread interception_worker_thread(interception_input_thread_func);
+            interception_worker_thread.detach(); // Detach as per existing recoil thread logic
+            output_log_message("Interception input worker thread started.\n");
+        } else {
+            output_log_message("Interception input worker thread skipped. Using SendInput fallback.\n");
+        }
 
         // Start the recoil control thread
         output_log_message("Attempting to start recoil thread...\n");
@@ -5752,29 +5575,14 @@ int main(int, char**) {
 
         std::cout << "\nScript is active..." << std::endl;
 
-        // Note: The original main1.cpp code waited for threads to join here.
-        // In a GUI application (which main.cpp seems to be), joining these threads
-        // in the main UI thread will block the UI. You might need a different approach
-        // for thread management (e.g., detaching threads or managing their lifecycle
-        // in a way that doesn't block the main loop).
-        // For now, I'm including the join calls as they were in your provided code.
-
-        if (interception_worker_thread.joinable()) {
-            interception_worker_thread.detach(); // منتظر ماندن برای نخ ورودی (معمولاً تا بسته شدن برنامه) - این خط برنامه اصلی را متوقف می‌کند تا این نخ تمام شود
-        }
-        if (recoil_thr.joinable()) { // اگر نخ ورودی تمام شد، این هم باید متوقف شود
-            // Note: kickback_active and stop_recoil_flag might need to be set
-            // before joining if you want to signal the threads to stop gracefully.
-            // The original code set these flags here, assuming the input thread finishing
-            // was the signal. Adjust if your application exit logic is different.
-            // kickback_active.store(false); // غیرفعال کردن ماکرو
-            // stop_recoil_flag.store(true); // درخواست توقف
-            recoil_thr.detach(); // این خط برنامه اصلی را متوقف می‌کند تا نخ لگد تمام شود
-        }
     } catch (const std::exception& e) {
-        std::cerr << "An unexpected error occurred in main: " << e.what() << std::endl;
+        std::string message = std::string("FATAL ERROR: An unexpected error occurred in main: ") + e.what() + "\n";
+        std::cerr << message;
+        log_fatal_error(message);
     } catch (...) {
-        std::cerr << "An unknown unexpected error occurred in main." << std::endl;
+        std::string message = "FATAL ERROR: An unknown unexpected error occurred in main.\n";
+        std::cerr << message;
+        log_fatal_error(message);
     }
 
     // Initialize Winsock (Needed for actual socket implementation later)
@@ -7439,62 +7247,6 @@ int main(int, char**) {
 
     return 0;
 }
-// تابع برای مخفی کردن فایل DLL در ابتدای اجرای برنامه
-bool hide_interception_dll() {
-    try {
-        // مسیر فایل DLL در کنار برنامه
-        char current_dir[MAX_PATH];
-        GetCurrentDirectoryA(MAX_PATH, current_dir);
-        std::string dll_path = std::string(current_dir) + "\\interception.dll";
-        
-        // بررسی وجود فایل DLL
-        DWORD fileAttributes = GetFileAttributesA(dll_path.c_str());
-        if (fileAttributes != INVALID_FILE_ATTRIBUTES) {
-            // ایجاد مسیر در AppData برای ذخیره DLL
-            char appDataPath[MAX_PATH];
-            if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, appDataPath))) {
-                std::string appFolder = std::string(appDataPath) + "\\CoreProgram";
-                
-                // ایجاد پوشه اگر وجود ندارد
-                DWORD folderAttributes = GetFileAttributesA(appFolder.c_str());
-                if (folderAttributes == INVALID_FILE_ATTRIBUTES) {
-                    CreateDirectoryA(appFolder.c_str(), NULL);
-                }
-                
-                // تنظیم مسیر DLL در پوشه مخفی
-                std::string hidden_dll_path = appFolder + "\\interception_core.dll";
-                
-                // کپی فایل DLL به مسیر مخفی
-                if (CopyFileA(dll_path.c_str(), hidden_dll_path.c_str(), FALSE)) {
-                    std::cout << "Copied interception.dll to hidden location." << std::endl;
-                    
-                    // حذف فایل DLL اصلی
-                    if (DeleteFileA(dll_path.c_str())) {
-                        std::cout << "Successfully deleted original interception.dll." << std::endl;
-                        return true;
-                    } else {
-                        std::cout << "Failed to delete original interception.dll." << std::endl;
-                    }
-                } else {
-                    std::cout << "Failed to copy interception.dll to hidden location." << std::endl;
-                }
-            } else {
-                std::cout << "Failed to get AppData path." << std::endl;
-            }
-        } else {
-            std::cout << "interception.dll not found in application directory." << std::endl;
-            // فایل وجود ندارد، احتمالاً قبلاً مخفی شده است
-            return true;
-        }
-    } catch (const std::exception& e) {
-        std::cout << "Exception while hiding interception.dll: " << e.what() << std::endl;
-    } catch (...) {
-        std::cout << "Unknown error while hiding interception.dll." << std::endl;
-    }
-    
-    return false;
-}
-
 // --- Win32 Message Procedure ---
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -7598,4 +7350,3 @@ void CleanupRenderTarget() {
     if (g_mainRenderTargetView) { g_mainRenderTargetView->Release(); g_mainRenderTargetView = NULL; output_log_message("RenderTargetView released.\n"); }
     output_log_message("RenderTargetView cleanup finished.\n");
 }
-
