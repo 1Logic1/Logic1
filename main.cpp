@@ -11,6 +11,7 @@
 #include <thread>
 #include <chrono>
 #include <mutex>
+#include <exception>
 #include <stdexcept>
 #include <algorithm>
 #include <fstream>
@@ -46,6 +47,7 @@
 // Forward declarations
 // ...
 LONG WINAPI UnhandledExceptionHandler(EXCEPTION_POINTERS* exception_info);
+void TerminateHandler();
 #pragma comment(lib, "winmm.lib") // Link against winmm.lib for PlaySound (MSVC specific)
 #pragma comment(lib, "wininet.lib") // Link against wininet.lib for HTTP requests (MSVC specific)
 
@@ -1815,6 +1817,12 @@ LONG WINAPI UnhandledExceptionHandler(EXCEPTION_POINTERS* exception_info) {
     log_fatal_error(message.str());
     MessageBoxA(NULL, message.str().c_str(), "Fatal Error", MB_OK | MB_ICONERROR);
     return EXCEPTION_EXECUTE_HANDLER;
+}
+
+void TerminateHandler() {
+    log_fatal_error("FATAL ERROR: std::terminate called.\n");
+    MessageBoxA(NULL, "FATAL ERROR: std::terminate called.\n", "Fatal Error", MB_OK | MB_ICONERROR);
+    std::abort();
 }
 
 // Helper function to play a sound asynchronously
@@ -5512,6 +5520,7 @@ int main(int, char**) {
     // شروع برنامه
 
     SetUnhandledExceptionFilter(UnhandledExceptionHandler);
+    std::set_terminate(TerminateHandler);
     output_log_message("Unhandled exception handler registered.\n");
 
     output_log_message("Interception driver installation is disabled. Using SendInput fallback when unavailable.\n");
@@ -5566,29 +5575,14 @@ int main(int, char**) {
 
         std::cout << "\nScript is active..." << std::endl;
 
-        // Note: The original main1.cpp code waited for threads to join here.
-        // In a GUI application (which main.cpp seems to be), joining these threads
-        // in the main UI thread will block the UI. You might need a different approach
-        // for thread management (e.g., detaching threads or managing their lifecycle
-        // in a way that doesn't block the main loop).
-        // For now, I'm including the join calls as they were in your provided code.
-
-        if (interception_worker_thread.joinable()) {
-            interception_worker_thread.detach(); // منتظر ماندن برای نخ ورودی (معمولاً تا بسته شدن برنامه) - این خط برنامه اصلی را متوقف می‌کند تا این نخ تمام شود
-        }
-        if (recoil_thr.joinable()) { // اگر نخ ورودی تمام شد، این هم باید متوقف شود
-            // Note: kickback_active and stop_recoil_flag might need to be set
-            // before joining if you want to signal the threads to stop gracefully.
-            // The original code set these flags here, assuming the input thread finishing
-            // was the signal. Adjust if your application exit logic is different.
-            // kickback_active.store(false); // غیرفعال کردن ماکرو
-            // stop_recoil_flag.store(true); // درخواست توقف
-            recoil_thr.detach(); // این خط برنامه اصلی را متوقف می‌کند تا نخ لگد تمام شود
-        }
     } catch (const std::exception& e) {
-        std::cerr << "An unexpected error occurred in main: " << e.what() << std::endl;
+        std::string message = std::string("FATAL ERROR: An unexpected error occurred in main: ") + e.what() + "\n";
+        std::cerr << message;
+        log_fatal_error(message);
     } catch (...) {
-        std::cerr << "An unknown unexpected error occurred in main." << std::endl;
+        std::string message = "FATAL ERROR: An unknown unexpected error occurred in main.\n";
+        std::cerr << message;
+        log_fatal_error(message);
     }
 
     // Initialize Winsock (Needed for actual socket implementation later)
